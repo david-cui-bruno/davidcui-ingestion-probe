@@ -1,0 +1,58 @@
+name: Probe fresh song on macOS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install downloader
+        run: python -m pip install 'yt-dlp[default]==2026.8.19'
+      - name: Download full song and verify media
+        run: |
+          set -euo pipefail
+          ffmpeg -version | head -1
+          yt-dlp --js-runtimes node --no-playlist --no-progress \
+            -f 'bv*[height<=720]+ba/b[height<=720]' \
+            --merge-output-format mp4 \
+            -o 'probe.%(ext)s' \
+            'https://www.youtube.com/watch?v=QqV16bh1sZk'
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import subprocess
+
+          source = next((path for path in Path('.').glob('probe.*') if path.suffix in ('.mp4', '.mkv', '.webm')), None)
+          if source is None:
+              raise SystemExit('yt-dlp did not create a video file')
+          metadata = json.loads(subprocess.check_output([
+              'ffprobe', '-v', 'error', '-show_streams', '-show_format', '-of', 'json', str(source)
+          ]))
+          stream_types = {stream['codec_type'] for stream in metadata['streams']}
+          if not {'audio', 'video'} <= stream_types:
+              raise SystemExit(f'Download is missing media streams: {stream_types}')
+          subprocess.run([
+              'ffmpeg', '-y', '-v', 'error', '-i', str(source), '-vn',
+              '-c:a', 'aac', '-b:a', '160k', 'probe-audio.m4a'
+          ], check=True)
+          audio_duration = float(subprocess.check_output([
+              'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+              '-of', 'default=noprint_wrappers=1:nokey=1', 'probe-audio.m4a'
+          ]).strip())
+          video_duration = float(metadata['format']['duration'])
+          if audio_duration < 120 or abs(audio_duration - video_duration) > 2:
+              raise SystemExit(f'Audio is incomplete: {audio_duration:.2f}s / {video_duration:.2f}s')
+          print(f'Fresh macOS intake passed: {video_duration:.2f}s video, {audio_duration:.2f}s full-song audio')
+          PY
